@@ -1,0 +1,12 @@
+node_modules/
+backend/node_modules/
+backend/data/
+frontend/node_modules/
+frontend/dist/
+data/
+backup/
+build-and-push.sh
+.git
+.gitignore
+.env
+.DS_Store

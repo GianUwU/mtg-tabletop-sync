@@ -1,0 +1,23 @@
+services:
+  mtgstats:
+    image: registry.gian.ink/mtgstats:latest
+    container_name: mtgstats
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./data:/app/backend/data
+    environment:
+      - PORT=3000
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=frontend
+      - traefik.http.routers.mtgstats.rule=Host(`mtg.gian.ink`)
+      - traefik.http.routers.mtgstats.entrypoints=websecure
+      - traefik.http.routers.mtgstats.tls=true
+      - traefik.http.routers.mtgstats.tls.certresolver=cloudflare
+
+networks:
+  default:
+  frontend:
+    external: true
