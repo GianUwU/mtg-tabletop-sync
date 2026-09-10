@@ -277,6 +277,84 @@ function moveClientToSession(ws, targetSessionKey, prevSession) {
   return newSession;
 }
 
+// Daily Visitor Tracking Setup
+const VISITS_FILE = path.join(DATA_DIR, 'visits.json');
+let dailyVisits = {};
+const activeUniqueHashes = new Map(); // dateString -> Set of anonymous hashes
+
+function loadVisits() {
+  if (fs.existsSync(VISITS_FILE)) {
+    try {
+      const raw = fs.readFileSync(VISITS_FILE, 'utf8');
+      dailyVisits = JSON.parse(raw) || {};
+    } catch (e) {
+      console.error('Error loading visits file:', e);
+      dailyVisits = {};
+    }
+  }
+}
+
+let visitsSaveTimer = null;
+function scheduleSaveVisits() {
+  if (visitsSaveTimer) return;
+  visitsSaveTimer = setTimeout(() => {
+    visitsSaveTimer = null;
+    try {
+      fs.writeFile(VISITS_FILE, JSON.stringify(dailyVisits, null, 2), (err) => {
+        if (err) console.error('Error saving visits file:', err);
+      });
+    } catch (e) {
+      console.error('Error saving visits:', e);
+    }
+  }, 1000);
+}
+
+function flushVisits() {
+  try {
+    fs.writeFileSync(VISITS_FILE, JSON.stringify(dailyVisits, null, 2));
+  } catch (e) {
+    console.error('Error flushing visits:', e);
+  }
+}
+
+loadVisits();
+
+function recordVisit(clientIp, userAgent) {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  if (!dailyVisits[today]) {
+    dailyVisits[today] = { totalViews: 0, uniqueVisitors: 0 };
+  }
+
+  dailyVisits[today].totalViews += 1;
+
+  if (!activeUniqueHashes.has(today)) {
+    activeUniqueHashes.set(today, new Set());
+    // Prune days older than today
+    for (const d of activeUniqueHashes.keys()) {
+      if (d !== today) activeUniqueHashes.delete(d);
+    }
+  }
+
+  const rawId = `${clientIp || 'unknown'}-${userAgent || ''}-${today}`;
+  const visitorHash = crypto.createHash('sha256').update(rawId).digest('hex').slice(0, 16);
+
+  const todaySet = activeUniqueHashes.get(today);
+  if (!todaySet.has(visitorHash)) {
+    todaySet.add(visitorHash);
+    dailyVisits[today].uniqueVisitors += 1;
+  }
+
+  scheduleSaveVisits();
+}
+
+function extractClientInfo(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  const ip = (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : '') || req.socket?.remoteAddress || '';
+  const ua = req.headers['user-agent'] || '';
+  return { ip, ua };
+}
+
 // Periodic cleanup of inactive sessions (> 2h)
 setInterval(() => {
   const now = Date.now();
@@ -289,6 +367,18 @@ setInterval(() => {
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// Daily Visit Logging Endpoint
+app.all('/api/visit', (req, res) => {
+  const { ip, ua } = extractClientInfo(req);
+  recordVisit(ip, ua);
+  res.json({ ok: true });
+});
+
+// View Stats Endpoint
+app.get('/api/stats', (req, res) => {
+  res.json({ visits: dailyVisits });
 });
 
 app.get('/api/session/:sessionKey', (req, res) => {
@@ -309,6 +399,9 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws, req) => {
+  const { ip, ua } = extractClientInfo(req);
+  recordVisit(ip, ua);
+
   let currentSession = null;
 
   try {
@@ -671,11 +764,13 @@ wss.on('connection', (ws, req) => {
 });
 
 process.on('SIGTERM', () => {
+  flushVisits();
   flushAllSessions();
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
+  flushVisits();
   flushAllSessions();
   process.exit(0);
 });

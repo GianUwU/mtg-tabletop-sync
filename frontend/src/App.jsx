@@ -639,6 +639,11 @@ export default function App() {
     updateRoomSettings,
   } = useSession()
 
+  // Track daily visit on initial page load
+  useEffect(() => {
+    fetch('/api/visit', { method: 'POST' }).catch(() => {})
+  }, [])
+
   // Floating Sequential Delta Micro-Interactions (+1, +2, +3, -1, -2...)
   const [floatingDeltas, setFloatingDeltas] = useState({})
   const floatingDeltaTimersRef = useRef({})
