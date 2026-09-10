@@ -4,6 +4,8 @@ A synchronized, real-time multi-device web application designed for tracking Mag
 
 **Live Demo / Hosted Instance:** [**mtg.gian.ink**](https://mtg.gian.ink)
 
+![MTG Tabletop Sync in Action](preview.jpeg)
+
 ---
 
 ## Features
@@ -15,7 +17,7 @@ A synchronized, real-time multi-device web application designed for tracking Mag
 
 - **Real-Time Multi-Device Sync:**
   - High-performance WebSocket architecture keeps all connected devices in instant sync.
-  - Scan the on-screen **QR Code** or share the **4-digit room code** so players can control their life and counters directly from their smartphones.
+  - Scan the on-screen **QR Code** or share the **4-character room code** so players can control their life and counters directly from their smartphones.
 
 - **Comprehensive Stat & Counter Tracking:**
   - **Life Totals:** Fast tap (+1/-1) and long-press (+10/-10) repeat increments.

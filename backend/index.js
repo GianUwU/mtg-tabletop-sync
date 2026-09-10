@@ -47,7 +47,7 @@ function sanitizeKey(key) {
   return clean || generateRoomCode();
 }
 
-function sanitizeString(val, fallback = '', maxLen = 128) {
+function sanitizeString(val, fallback = '', maxLen = 256) {
   if (typeof val !== 'string') return fallback;
   return val.slice(0, maxLen);
 }
@@ -57,18 +57,23 @@ function sanitizeNumber(val, fallback = 0, min = -1000000, max = 1000000) {
   return Math.max(min, Math.min(max, Math.round(val)));
 }
 
+function sanitizeFloat(val, fallback = 1.0, min = -1000000, max = 1000000) {
+  if (typeof val !== 'number' || !Number.isFinite(val)) return fallback;
+  return Math.max(min, Math.min(max, Number(val.toFixed(4))));
+}
+
 function sanitizeColor(val, fallback = '#38bdf8') {
   if (typeof val !== 'string') return fallback;
   const trimmed = val.trim();
-  if (/^(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|hsla?\([^)]+\))$/.test(trimmed)) {
-    return trimmed;
+  if (/^[a-zA-Z0-9_#()%,. -]{1,64}$/.test(trimmed)) {
+    return trimmed.slice(0, 64);
   }
   return fallback;
 }
 
 function sanitizeBorderStyles(arr) {
   if (!Array.isArray(arr)) return [];
-  return arr.filter(item => typeof item === 'string').slice(0, 10);
+  return arr.filter(item => typeof item === 'string').slice(0, 20);
 }
 
 function sanitizeSides(sidesArr, defaultLife = 20, defaultColor = '#38bdf8', bgImage = null) {
@@ -81,6 +86,7 @@ function sanitizeSides(sidesArr, defaultLife = 20, defaultColor = '#38bdf8', bgI
       color: defaultColor,
       bgImage: bgImage,
       borderStyles: [],
+      borderStyle: 'standard',
     }];
   }
 
@@ -94,17 +100,19 @@ function sanitizeSides(sidesArr, defaultLife = 20, defaultColor = '#38bdf8', bgI
         color: defaultColor,
         bgImage: null,
         borderStyles: [],
+        borderStyle: 'standard',
       };
     }
     return {
       index: typeof side.index === 'number' && Number.isFinite(side.index) ? sanitizeNumber(side.index, i, -100, 100) : i,
       id: sanitizeString(side.id, `s_${i}_${Date.now()}`, 64),
-      type: sanitizeString(side.type, i === 0 ? 'life' : 'custom', 32),
+      type: sanitizeString(side.type, i === 0 ? 'life' : 'custom', 64),
       label: sanitizeString(side.label, '', 64),
       value: sanitizeNumber(side.value, i === 0 ? defaultLife : 0),
       color: sanitizeColor(side.color, defaultColor),
-      bgImage: side.bgImage && typeof side.bgImage === 'string' ? sanitizeString(side.bgImage, null, 512) : null,
+      bgImage: side.bgImage && typeof side.bgImage === 'string' ? sanitizeString(side.bgImage, null, 1024) : null,
       borderStyles: sanitizeBorderStyles(side.borderStyles),
+      borderStyle: sanitizeString(side.borderStyle, 'standard', 64),
     };
   });
 }
@@ -459,13 +467,16 @@ wss.on('connection', (ws, req) => {
 
         const newPlayer = {
           id: sanitizeString(pData.id, `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`, 64),
-          name: sanitizeString(pData.name, `Player ${currentSession.state.players.length + 1}`, 40),
-          x: sanitizeNumber(pData.x, 0, -2000, 2000),
-          y: sanitizeNumber(pData.y, -220, -2000, 2000),
+          name: sanitizeString(pData.name, `Player ${currentSession.state.players.length + 1}`, 64),
+          x: sanitizeNumber(pData.x, 0, -5000, 5000),
+          y: sanitizeNumber(pData.y, -220, -5000, 5000),
           angle: sanitizeNumber(pData.angle, 0, -360, 360),
-          life: mainSide ? mainSide.value : 20,
+          life: mainSide ? mainSide.value : defaultLife,
           sides: initialSides,
           color: pColor,
+          borderStyles: sanitizeBorderStyles(pData.borderStyles),
+          borderStyle: sanitizeString(pData.borderStyle, 'standard', 64),
+          bgImage: pData.bgImage ? sanitizeString(pData.bgImage, null, 1024) : null,
           mergedWith: pData.mergedWith && typeof pData.mergedWith === 'string' ? sanitizeString(pData.mergedWith, null, 64) : null,
         };
 
@@ -539,12 +550,13 @@ wss.on('connection', (ws, req) => {
           const sideObj = {
             index: sanitizeNumber(msg.side.index, player.sides.length, -100, 100),
             id: sanitizeString(msg.side.id, `s_${player.sides.length}_${Date.now()}`, 64),
-            type: sanitizeString(msg.side.type, 'custom', 32),
+            type: sanitizeString(msg.side.type, 'custom', 64),
             label: sanitizeString(msg.side.label, 'Counter', 64),
             value: sanitizeNumber(msg.side.value, 0),
             color: sanitizeColor(msg.side.color, player.color || '#38bdf8'),
-            bgImage: msg.side.bgImage && typeof msg.side.bgImage === 'string' ? sanitizeString(msg.side.bgImage, null, 512) : null,
+            bgImage: msg.side.bgImage && typeof msg.side.bgImage === 'string' ? sanitizeString(msg.side.bgImage, null, 1024) : null,
             borderStyles: sanitizeBorderStyles(msg.side.borderStyles),
+            borderStyle: sanitizeString(msg.side.borderStyle, 'standard', 64),
           };
 
           const existingIdx = player.sides.findIndex(s => s.index === sideObj.index);
@@ -573,14 +585,36 @@ wss.on('connection', (ws, req) => {
       if (msg.type === 'update_side' && typeof msg.playerId === 'string' && typeof msg.sideIndex === 'number' && msg.updates && typeof msg.updates === 'object') {
         const player = currentSession.state.players.find(p => p.id === msg.playerId);
         if (player && Array.isArray(player.sides)) {
-          const targetSide = player.sides.find(s => s.index === msg.sideIndex);
+          let targetSide = player.sides.find(s => s.index === msg.sideIndex);
+          if (!targetSide && msg.sideIndex === 0) targetSide = player.sides[0];
           if (targetSide) {
             const u = msg.updates;
             if (u.label !== undefined) targetSide.label = sanitizeString(u.label, targetSide.label, 64);
-            if (u.type !== undefined) targetSide.type = sanitizeString(u.type, targetSide.type, 32);
-            if (u.color !== undefined) targetSide.color = sanitizeColor(u.color, targetSide.color);
-            if (u.bgImage !== undefined) targetSide.bgImage = u.bgImage ? sanitizeString(u.bgImage, null, 512) : null;
-            if (u.borderStyles !== undefined) targetSide.borderStyles = sanitizeBorderStyles(u.borderStyles);
+            if (u.type !== undefined) targetSide.type = sanitizeString(u.type, targetSide.type, 64);
+            if (u.color !== undefined) {
+              targetSide.color = sanitizeColor(u.color, targetSide.color);
+              if (msg.sideIndex === 0) {
+                player.color = targetSide.color;
+              }
+            }
+            if (u.bgImage !== undefined) {
+              targetSide.bgImage = u.bgImage ? sanitizeString(u.bgImage, null, 1024) : null;
+              if (msg.sideIndex === 0) {
+                player.bgImage = targetSide.bgImage;
+              }
+            }
+            if (u.borderStyles !== undefined) {
+              targetSide.borderStyles = sanitizeBorderStyles(u.borderStyles);
+              if (msg.sideIndex === 0) {
+                player.borderStyles = targetSide.borderStyles;
+              }
+            }
+            if (u.borderStyle !== undefined) {
+              targetSide.borderStyle = sanitizeString(u.borderStyle, 'standard', 64);
+              if (msg.sideIndex === 0) {
+                player.borderStyle = targetSide.borderStyle;
+              }
+            }
             if (typeof u.value === 'number' && Number.isFinite(u.value)) {
               targetSide.value = sanitizeNumber(u.value);
               if (msg.sideIndex === 0) {
@@ -610,14 +644,27 @@ wss.on('connection', (ws, req) => {
         const player = currentSession.state.players.find(p => p.id === msg.playerId);
         if (player) {
           const u = msg.updates;
-          if (u.name !== undefined) player.name = sanitizeString(u.name, player.name, 40);
-          if (typeof u.x === 'number') player.x = sanitizeNumber(u.x, player.x, -2000, 2000);
-          if (typeof u.y === 'number') player.y = sanitizeNumber(u.y, player.y, -2000, 2000);
+          if (u.name !== undefined) player.name = sanitizeString(u.name, player.name, 64);
+          if (typeof u.x === 'number') player.x = sanitizeNumber(u.x, player.x, -5000, 5000);
+          if (typeof u.y === 'number') player.y = sanitizeNumber(u.y, player.y, -5000, 5000);
           if (typeof u.angle === 'number') player.angle = sanitizeNumber(u.angle, player.angle, -360, 360);
-          if (u.color !== undefined) player.color = sanitizeColor(u.color, player.color);
-          if (u.bgImage !== undefined) player.bgImage = u.bgImage ? sanitizeString(u.bgImage, null, 512) : null;
+          if (u.color !== undefined) {
+            player.color = sanitizeColor(u.color, player.color);
+            if (Array.isArray(player.sides) && player.sides[0]) {
+              player.sides[0].color = player.color;
+            }
+          }
+          if (u.bgImage !== undefined) player.bgImage = u.bgImage ? sanitizeString(u.bgImage, null, 1024) : null;
           if (u.borderStyles !== undefined) player.borderStyles = sanitizeBorderStyles(u.borderStyles);
+          if (u.borderStyle !== undefined) player.borderStyle = sanitizeString(u.borderStyle, 'standard', 64);
           if (u.mergedWith !== undefined) player.mergedWith = u.mergedWith ? sanitizeString(u.mergedWith, null, 64) : null;
+
+          if (typeof u.life === 'number' && Number.isFinite(u.life)) {
+            player.life = sanitizeNumber(u.life, player.life);
+            if (Array.isArray(player.sides) && player.sides[0]) {
+              player.sides[0].value = player.life;
+            }
+          }
 
           if (Array.isArray(u.sides)) {
             player.sides = sanitizeSides(u.sides, player.life || 20, player.color, player.bgImage);
@@ -687,25 +734,18 @@ wss.on('connection', (ws, req) => {
           currentSession.state.roomSettings = {};
         }
 
-        const safeKeys = [
-          'theme', 'icon', 'primaryColor', 'secondaryColor', 'accentColor',
-          'customFont', 'zoomScale', 'orientation', 'layout', 'customColors',
-          'hideCounters', 'turnBallMode', 'showClock', 'tableBackground',
-          'gameMode', 'keepScreenAwake'
-        ];
-
-        for (const key of safeKeys) {
-          if (msg.settings[key] !== undefined) {
-            const val = msg.settings[key];
-            if (typeof val === 'string') {
-              currentSession.state.roomSettings[key] = sanitizeString(val, '', 256);
-            } else if (typeof val === 'number') {
-              currentSession.state.roomSettings[key] = sanitizeNumber(val, 1, -1000, 1000);
-            } else if (typeof val === 'boolean') {
-              currentSession.state.roomSettings[key] = Boolean(val);
-            } else if (Array.isArray(val)) {
-              currentSession.state.roomSettings[key] = val.filter(x => typeof x === 'string').slice(0, 50);
-            }
+        for (const [key, val] of Object.entries(msg.settings)) {
+          if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+          if (typeof val === 'string') {
+            currentSession.state.roomSettings[key] = sanitizeString(val, '', 512);
+          } else if (typeof val === 'number' && Number.isFinite(val)) {
+            currentSession.state.roomSettings[key] = sanitizeFloat(val, 1.0, -100000, 100000);
+          } else if (typeof val === 'boolean') {
+            currentSession.state.roomSettings[key] = Boolean(val);
+          } else if (Array.isArray(val)) {
+            currentSession.state.roomSettings[key] = val.filter(x => typeof x === 'string' || typeof x === 'number').slice(0, 100);
+          } else if (val === null) {
+            currentSession.state.roomSettings[key] = null;
           }
         }
 
