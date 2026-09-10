@@ -4,6 +4,7 @@ const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,72 +15,102 @@ app.use(express.json());
 // Persistent storage setup
 const DATA_DIR = path.join(__dirname, 'data');
 const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
-const DELETED_SESSIONS_FILE = path.join(DATA_DIR, 'deleted_sessions.json');
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }
 
-const deletedSessions = new Set();
+// 4-Character Alphanumeric Room Codes (0-9, A-Z) -> 36^4 = 1,679,616 possibilities
+const ALPHANUMERIC_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
-function loadDeletedSessions() {
-  if (fs.existsSync(DELETED_SESSIONS_FILE)) {
-    try {
-      const raw = fs.readFileSync(DELETED_SESSIONS_FILE, 'utf8');
-      const data = JSON.parse(raw);
-      if (Array.isArray(data)) {
-        for (const k of data) {
-          if (typeof k === 'string') deletedSessions.add(k);
-        }
-      }
-    } catch (e) {
-      console.error('Error loading deleted sessions file:', e);
-    }
-  }
-}
-
-function saveDeletedSessions() {
-  try {
-    fs.writeFileSync(DELETED_SESSIONS_FILE, JSON.stringify(Array.from(deletedSessions), null, 2));
-  } catch (e) {
-    console.error('Error saving deleted sessions file:', e);
-  }
-}
-
-loadDeletedSessions();
-
-function isSessionDeleted(sessionKey) {
-  if (!sessionKey || typeof sessionKey !== 'string') return false;
-  const cleanKey = sessionKey.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  return deletedSessions.has(cleanKey);
-}
-
-function markSessionDeleted(sessionKey) {
-  if (!sessionKey || typeof sessionKey !== 'string') return;
-  const cleanKey = sessionKey.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  deletedSessions.add(cleanKey);
-  saveDeletedSessions();
-}
-
-function generate4DigitCode() {
+function generateRoomCode() {
   let code = '';
   let attempts = 0;
   do {
-    code = Math.floor(1000 + Math.random() * 9000).toString();
+    code = '';
+    const bytes = crypto.randomBytes(4);
+    for (let i = 0; i < 4; i++) {
+      code += ALPHANUMERIC_CHARS[bytes[i] % ALPHANUMERIC_CHARS.length];
+    }
     attempts++;
-  } while ((deletedSessions.has(code) || sessions.has(code)) && attempts < 1000);
+  } while (sessions.has(code) && attempts < 1000);
   return code;
+}
+
+const generate4DigitCode = generateRoomCode;
+
+// Input Sanitization Helpers to Prevent Prototype Pollution & Type Confusion
+function sanitizeKey(key) {
+  if (!key || typeof key !== 'string') return generateRoomCode();
+  const clean = key.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '_').slice(0, 32);
+  return clean || generateRoomCode();
+}
+
+function sanitizeString(val, fallback = '', maxLen = 128) {
+  if (typeof val !== 'string') return fallback;
+  return val.slice(0, maxLen);
+}
+
+function sanitizeNumber(val, fallback = 0, min = -1000000, max = 1000000) {
+  if (typeof val !== 'number' || !Number.isFinite(val)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(val)));
+}
+
+function sanitizeColor(val, fallback = '#38bdf8') {
+  if (typeof val !== 'string') return fallback;
+  const trimmed = val.trim();
+  if (/^(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|hsla?\([^)]+\))$/.test(trimmed)) {
+    return trimmed;
+  }
+  return fallback;
+}
+
+function sanitizeBorderStyles(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter(item => typeof item === 'string').slice(0, 10);
+}
+
+function sanitizeSides(sidesArr, defaultLife = 20, defaultColor = '#38bdf8', bgImage = null) {
+  if (!Array.isArray(sidesArr) || sidesArr.length === 0) {
+    return [{
+      index: 0,
+      type: 'life',
+      label: '',
+      value: defaultLife,
+      color: defaultColor,
+      bgImage: bgImage,
+      borderStyles: [],
+    }];
+  }
+
+  return sidesArr.slice(0, 20).map((side, i) => {
+    if (typeof side !== 'object' || side === null) {
+      return {
+        index: i,
+        type: i === 0 ? 'life' : 'custom',
+        label: i === 0 ? '' : 'Counter',
+        value: typeof side === 'number' && Number.isFinite(side) ? side : 0,
+        color: defaultColor,
+        bgImage: null,
+        borderStyles: [],
+      };
+    }
+    return {
+      index: typeof side.index === 'number' && Number.isFinite(side.index) ? sanitizeNumber(side.index, i, -100, 100) : i,
+      id: sanitizeString(side.id, `s_${i}_${Date.now()}`, 64),
+      type: sanitizeString(side.type, i === 0 ? 'life' : 'custom', 32),
+      label: sanitizeString(side.label, '', 64),
+      value: sanitizeNumber(side.value, i === 0 ? defaultLife : 0),
+      color: sanitizeColor(side.color, defaultColor),
+      bgImage: side.bgImage && typeof side.bgImage === 'string' ? sanitizeString(side.bgImage, null, 512) : null,
+      borderStyles: sanitizeBorderStyles(side.borderStyles),
+    };
+  });
 }
 
 // Session Manager
 const sessions = new Map();
-
-function sanitizeKey(key) {
-  if (!key || typeof key !== 'string') return generate4DigitCode();
-  const clean = key.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  return clean || generate4DigitCode();
-}
 
 function getSessionFilePath(sessionKey) {
   return path.join(SESSIONS_DIR, `${sessionKey}.json`);
@@ -87,9 +118,6 @@ function getSessionFilePath(sessionKey) {
 
 function loadSession(sessionKey) {
   const cleanKey = sanitizeKey(sessionKey);
-  if (isSessionDeleted(cleanKey)) {
-    return null;
-  }
   if (sessions.has(cleanKey)) {
     return sessions.get(cleanKey);
   }
@@ -101,18 +129,21 @@ function loadSession(sessionKey) {
   if (fs.existsSync(filePath)) {
     try {
       const raw = fs.readFileSync(filePath, 'utf8');
-      state = JSON.parse(raw);
-      if (!Array.isArray(state.players)) {
-        state.players = [];
-      } else {
-        for (const p of state.players) {
-          if (!Array.isArray(p.sides)) {
-            p.sides = [typeof p.life === 'number' ? p.life : 20, 0, 0, 0];
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        state = parsed;
+        if (!Array.isArray(state.players)) {
+          state.players = [];
+        } else {
+          for (const p of state.players) {
+            p.sides = sanitizeSides(p.sides, typeof p.life === 'number' ? p.life : 20, p.color, p.bgImage);
+            const mainSide = p.sides.find(s => s.index === 0) || p.sides[0];
+            if (mainSide) p.life = mainSide.value;
           }
         }
-      }
-      if (typeof state._lastActiveAt === 'number') {
-        lastActiveAt = state._lastActiveAt;
+        if (typeof state._lastActiveAt === 'number') {
+          lastActiveAt = state._lastActiveAt;
+        }
       }
     } catch (err) {
       console.error(`Error loading session file ${filePath}:`, err);
@@ -139,10 +170,6 @@ function initPersistedSessions() {
     for (const file of files) {
       if (file.endsWith('.json')) {
         const sessionKey = file.slice(0, -5);
-        if (isSessionDeleted(sessionKey)) {
-          try { fs.unlinkSync(path.join(SESSIONS_DIR, file)); } catch (_) {}
-          continue;
-        }
         const session = loadSession(sessionKey);
         if (session && now - session.lastActiveAt >= TWO_HOURS_MS) {
           sessions.delete(session.sessionKey);
@@ -195,30 +222,6 @@ function flushAllSessions() {
   }
 }
 
-function getActiveSessionsList() {
-  const list = [];
-
-  for (const [key, session] of sessions.entries()) {
-    if (isSessionDeleted(key)) continue;
-    // Closed rooms (no clients currently connected) must not show up in the room switch dropdown
-    if (session.clients.size === 0) continue;
-
-    list.push({
-      sessionKey: key,
-      connectedClients: session.clients.size,
-      playerCount: Array.isArray(session.state?.players) ? session.state.players.length : 0,
-      lastActiveAt: session.lastActiveAt,
-    });
-  }
-
-  return list.sort((a, b) => {
-    if (b.connectedClients !== a.connectedClients) {
-      return b.connectedClients - a.connectedClients;
-    }
-    return b.lastActiveAt - a.lastActiveAt;
-  });
-}
-
 function broadcastSession(session, payload) {
   const data = JSON.stringify({
     ...payload,
@@ -244,36 +247,8 @@ function broadcastStateUpdate(session, ackActionId) {
   });
 }
 
-function broadcastGlobalSessionList() {
-  const list = getActiveSessionsList();
-  const data = JSON.stringify({
-    type: 'active_sessions',
-    sessions: list,
-  });
-
-  for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(data);
-    }
-  }
-}
-
 function moveClientToSession(ws, targetSessionKey, prevSession) {
   let targetKey = sanitizeKey(targetSessionKey);
-
-  if (isSessionDeleted(targetKey)) {
-    const remaining = getActiveSessionsList().filter(s => s.sessionKey !== targetKey);
-    const fallbackKey = remaining.length > 0 ? remaining[0].sessionKey : generate4DigitCode();
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'session_deleted',
-        sessionKey: targetKey,
-        fallbackKey,
-        error: 'This session has been deleted and cannot be accessed.',
-      }));
-    }
-    targetKey = fallbackKey;
-  }
 
   if (prevSession && prevSession.sessionKey === targetKey) {
     touchSessionActivity(prevSession);
@@ -292,14 +267,12 @@ function moveClientToSession(ws, targetSessionKey, prevSession) {
 
   let newSession = loadSession(targetKey);
   if (!newSession) {
-    targetKey = generate4DigitCode();
+    targetKey = generateRoomCode();
     newSession = loadSession(targetKey);
   }
   newSession.clients.add(ws);
   touchSessionActivity(newSession);
   scheduleSave(newSession);
-
-  setTimeout(broadcastGlobalSessionList, 50);
 
   return newSession;
 }
@@ -307,36 +280,22 @@ function moveClientToSession(ws, targetSessionKey, prevSession) {
 // Periodic cleanup of inactive sessions (> 2h)
 setInterval(() => {
   const now = Date.now();
-  let changed = false;
-
   for (const [key, session] of sessions.entries()) {
     if (session.clients.size === 0 && (now - session.lastActiveAt >= TWO_HOURS_MS)) {
       sessions.delete(key);
-      changed = true;
     }
-  }
-
-  if (changed) {
-    broadcastGlobalSessionList();
   }
 }, 60000);
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', activeSessions: sessions.size });
-});
-
-app.get('/api/sessions', (req, res) => {
-  res.json({ sessions: getActiveSessionsList().filter(s => !isSessionDeleted(s.sessionKey)) });
+  res.json({ status: 'ok' });
 });
 
 app.get('/api/session/:sessionKey', (req, res) => {
   const key = sanitizeKey(req.params.sessionKey);
-  if (isSessionDeleted(key)) {
-    return res.status(404).json({ error: 'This session has been permanently deleted.', deleted: true });
-  }
   const session = loadSession(key);
   if (!session) {
-    return res.status(404).json({ error: 'Session not found.', deleted: true });
+    return res.status(404).json({ error: 'Session not found.' });
   }
   res.json({
     sessionKey: session.sessionKey,
@@ -344,43 +303,6 @@ app.get('/api/session/:sessionKey', (req, res) => {
     connectedClients: session.clients.size,
     lastActiveAt: session.lastActiveAt,
   });
-});
-
-app.delete('/api/session/:sessionKey', (req, res) => {
-  const keyToDelete = sanitizeKey(req.params.sessionKey);
-  markSessionDeleted(keyToDelete);
-  const filePath = getSessionFilePath(keyToDelete);
-  const sessionObj = sessions.get(keyToDelete);
-
-  if (sessionObj) {
-    if (sessionObj.saveTimer) {
-      clearTimeout(sessionObj.saveTimer);
-      sessionObj.saveTimer = null;
-    }
-    sessionObj.dirty = false;
-    sessions.delete(keyToDelete);
-
-    const remaining = getActiveSessionsList().filter(s => s.sessionKey !== keyToDelete && !isSessionDeleted(s.sessionKey));
-    const fallbackKey = remaining.length > 0 ? remaining[0].sessionKey : generate4DigitCode();
-
-    for (const client of sessionObj.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({
-          type: 'session_deleted',
-          sessionKey: keyToDelete,
-          fallbackKey,
-        }));
-      }
-    }
-    sessionObj.clients.clear();
-  }
-
-  if (fs.existsSync(filePath)) {
-    try { fs.unlinkSync(filePath); } catch (e) {}
-  }
-
-  broadcastGlobalSessionList();
-  res.json({ success: true, deletedKey: keyToDelete, deleted: true });
 });
 
 const server = http.createServer(app);
@@ -392,7 +314,7 @@ wss.on('connection', (ws, req) => {
   try {
     const url = new URL(req.url, 'http://localhost');
     const queryKey = url.searchParams.get('session') || url.searchParams.get('s');
-    const initialKey = queryKey ? sanitizeKey(queryKey) : generate4DigitCode();
+    const initialKey = queryKey ? sanitizeKey(queryKey) : generateRoomCode();
     currentSession = moveClientToSession(ws, initialKey, null);
 
     ws.send(JSON.stringify({
@@ -401,20 +323,17 @@ wss.on('connection', (ws, req) => {
       state: currentSession.state,
       connectedClients: currentSession.clients.size,
     }));
-
-    ws.send(JSON.stringify({
-      type: 'active_sessions',
-      sessions: getActiveSessionsList(),
-    }));
   } catch (e) {
     console.error('Error in initial WS connection setup:', e);
-    currentSession = moveClientToSession(ws, generate4DigitCode(), null);
+    currentSession = moveClientToSession(ws, generateRoomCode(), null);
   }
 
   ws.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
-      const targetSessionKey = msg.sessionKey ? sanitizeKey(msg.sessionKey) : (currentSession ? currentSession.sessionKey : generate4DigitCode());
+      if (!msg || typeof msg !== 'object') return;
+
+      const targetSessionKey = msg.sessionKey ? sanitizeKey(msg.sessionKey) : (currentSession ? currentSession.sessionKey : generateRoomCode());
 
       if (!currentSession || currentSession.sessionKey !== targetSessionKey || msg.type === 'join') {
         currentSession = moveClientToSession(ws, targetSessionKey, currentSession);
@@ -436,23 +355,25 @@ wss.on('connection', (ws, req) => {
       }
 
       // 1. Add Player
-      if (msg.type === 'add_player' && msg.player) {
-        const initialSides = Array.isArray(msg.player.sides)
-          ? msg.player.sides
-          : [typeof msg.player.life === 'number' ? msg.player.life : 20, 0, 0, 0];
+      if (msg.type === 'add_player' && msg.player && typeof msg.player === 'object') {
+        if (currentSession.state.players.length >= 32) return; // Cap players per room
+
+        const pData = msg.player;
+        const pColor = sanitizeColor(pData.color, '#38bdf8');
+        const defaultLife = typeof pData.life === 'number' && Number.isFinite(pData.life) ? sanitizeNumber(pData.life, 20) : 20;
+        const initialSides = sanitizeSides(pData.sides, defaultLife, pColor, pData.bgImage);
+        const mainSide = initialSides.find(s => s.index === 0) || initialSides[0];
 
         const newPlayer = {
-          id: msg.player.id || `p_${Date.now()}_${Math.floor(Math.random()*1000)}`,
-          name: msg.player.name || `Player ${currentSession.state.players.length + 1}`,
-          // 2D position (normalized or pixel offset from center)
-          x: typeof msg.player.x === 'number' ? msg.player.x : 0,
-          y: typeof msg.player.y === 'number' ? msg.player.y : -220,
-          angle: typeof msg.player.angle === 'number' ? msg.player.angle : 0,
-          life: typeof initialSides[0] === 'object' && initialSides[0] !== null ? (initialSides[0].value ?? 20) : (initialSides[0] ?? 20),
+          id: sanitizeString(pData.id, `p_${Date.now()}_${Math.floor(Math.random() * 1000)}`, 64),
+          name: sanitizeString(pData.name, `Player ${currentSession.state.players.length + 1}`, 40),
+          x: sanitizeNumber(pData.x, 0, -2000, 2000),
+          y: sanitizeNumber(pData.y, -220, -2000, 2000),
+          angle: sanitizeNumber(pData.angle, 0, -360, 360),
+          life: mainSide ? mainSide.value : 20,
           sides: initialSides,
-          color: msg.player.color || '#38bdf8',
-          // Merge support
-          mergedWith: msg.player.mergedWith || null,
+          color: pColor,
+          mergedWith: pData.mergedWith && typeof pData.mergedWith === 'string' ? sanitizeString(pData.mergedWith, null, 64) : null,
         };
 
         currentSession.state.players.push(newPlayer);
@@ -461,28 +382,26 @@ wss.on('connection', (ws, req) => {
       }
 
       // 2. Update Life / Side Value
-      if (msg.type === 'update_life' && msg.playerId) {
+      if (msg.type === 'update_life' && typeof msg.playerId === 'string') {
         const player = currentSession.state.players.find(p => p.id === msg.playerId);
         if (player) {
-          if (!Array.isArray(player.sides)) {
-            player.sides = [{ index: 0, type: 'life', label: '', value: typeof player.life === 'number' ? player.life : 20, color: player.color || '#fbbf24', bgImage: player.bgImage || null }];
-          }
-          const sideIndex = typeof msg.sideIndex === 'number' ? msg.sideIndex : 0;
-          const delta = typeof msg.delta === 'number' ? msg.delta : 1;
+          player.sides = sanitizeSides(player.sides, player.life || 20, player.color, player.bgImage);
+          const sideIndex = sanitizeNumber(msg.sideIndex, 0, -100, 100);
+          const delta = sanitizeNumber(msg.delta, 1, -1000, 1000);
 
           let targetSide = player.sides.find(s => s.index === sideIndex);
           if (!targetSide && sideIndex === 0) {
             targetSide = player.sides[0];
           }
           if (targetSide) {
-            targetSide.value = (targetSide.value || 0) + delta;
+            targetSide.value = sanitizeNumber((targetSide.value || 0) + delta);
           }
           const mainSide = player.sides.find(s => s.index === 0) || player.sides[0];
-          
-          // Upping commander damage should equally subtract from main life
+
+          // Commander damage subtraction from main life
           if (targetSide && sideIndex !== 0 && (targetSide.type === 'commander' || (targetSide.label && targetSide.label.toLowerCase().includes('commander')))) {
             if (mainSide) {
-              mainSide.value = (mainSide.value || 0) - delta;
+              mainSide.value = sanitizeNumber((mainSide.value || 0) - delta);
             }
           }
 
@@ -495,8 +414,8 @@ wss.on('connection', (ws, req) => {
 
       // Reset All Players Life (for game modes)
       if (msg.type === 'reset_all_life') {
-        const soloLife = typeof msg.soloLife === 'number' ? msg.soloLife : 40;
-        const teamLife = typeof msg.teamLife === 'number' ? msg.teamLife : 60;
+        const soloLife = sanitizeNumber(msg.soloLife, 40, 1, 9999);
+        const teamLife = sanitizeNumber(msg.teamLife, 60, 1, 9999);
         for (const p of currentSession.state.players) {
           const startingLife = p.mergedWith ? teamLife : soloLife;
           p.life = startingLife;
@@ -510,27 +429,29 @@ wss.on('connection', (ws, req) => {
             }
           }
         }
-        if (msg.gameMode) {
-          currentSession.state.gameMode = msg.gameMode;
+        if (typeof msg.gameMode === 'string') {
+          currentSession.state.gameMode = sanitizeString(msg.gameMode, 'commander', 32);
         }
         broadcastStateUpdate(currentSession, msg.actionId);
         return;
       }
 
-      // Add Side (with signed integer index)
-      if (msg.type === 'add_side' && msg.playerId && msg.side) {
+      // Add Side
+      if (msg.type === 'add_side' && typeof msg.playerId === 'string' && msg.side && typeof msg.side === 'object') {
         const player = currentSession.state.players.find(p => p.id === msg.playerId);
         if (player) {
-          if (!Array.isArray(player.sides)) {
-            player.sides = [{ index: 0, type: 'life', label: '', value: typeof player.life === 'number' ? player.life : 20, color: player.color || '#fbbf24', bgImage: player.bgImage || null }];
-          }
+          player.sides = sanitizeSides(player.sides, player.life || 20, player.color, player.bgImage);
+          if (player.sides.length >= 20) return; // Limit sides per player
+
           const sideObj = {
-            index: typeof msg.side.index === 'number' ? msg.side.index : player.sides.length,
-            type: msg.side.type || 'custom',
-            label: msg.side.label || 'Counter',
-            value: typeof msg.side.value === 'number' ? msg.side.value : 0,
-            color: msg.side.color || '#38bdf8',
-            bgImage: msg.side.bgImage || null,
+            index: sanitizeNumber(msg.side.index, player.sides.length, -100, 100),
+            id: sanitizeString(msg.side.id, `s_${player.sides.length}_${Date.now()}`, 64),
+            type: sanitizeString(msg.side.type, 'custom', 32),
+            label: sanitizeString(msg.side.label, 'Counter', 64),
+            value: sanitizeNumber(msg.side.value, 0),
+            color: sanitizeColor(msg.side.color, player.color || '#38bdf8'),
+            bgImage: msg.side.bgImage && typeof msg.side.bgImage === 'string' ? sanitizeString(msg.side.bgImage, null, 512) : null,
+            borderStyles: sanitizeBorderStyles(msg.side.borderStyles),
           };
 
           const existingIdx = player.sides.findIndex(s => s.index === sideObj.index);
@@ -546,7 +467,7 @@ wss.on('connection', (ws, req) => {
       }
 
       // Remove Side
-      if (msg.type === 'remove_side' && msg.playerId && typeof msg.sideIndex === 'number') {
+      if (msg.type === 'remove_side' && typeof msg.playerId === 'string' && typeof msg.sideIndex === 'number') {
         const player = currentSession.state.players.find(p => p.id === msg.playerId);
         if (player && Array.isArray(player.sides) && msg.sideIndex !== 0) {
           player.sides = player.sides.filter(s => s.index !== msg.sideIndex);
@@ -556,23 +477,31 @@ wss.on('connection', (ws, req) => {
       }
 
       // Update Side Properties
-      if (msg.type === 'update_side' && msg.playerId && typeof msg.sideIndex === 'number' && msg.updates) {
+      if (msg.type === 'update_side' && typeof msg.playerId === 'string' && typeof msg.sideIndex === 'number' && msg.updates && typeof msg.updates === 'object') {
         const player = currentSession.state.players.find(p => p.id === msg.playerId);
         if (player && Array.isArray(player.sides)) {
           const targetSide = player.sides.find(s => s.index === msg.sideIndex);
           if (targetSide) {
-            Object.assign(targetSide, msg.updates);
-          }
-          if (msg.sideIndex === 0 && typeof msg.updates.value === 'number') {
-            player.life = msg.updates.value;
+            const u = msg.updates;
+            if (u.label !== undefined) targetSide.label = sanitizeString(u.label, targetSide.label, 64);
+            if (u.type !== undefined) targetSide.type = sanitizeString(u.type, targetSide.type, 32);
+            if (u.color !== undefined) targetSide.color = sanitizeColor(u.color, targetSide.color);
+            if (u.bgImage !== undefined) targetSide.bgImage = u.bgImage ? sanitizeString(u.bgImage, null, 512) : null;
+            if (u.borderStyles !== undefined) targetSide.borderStyles = sanitizeBorderStyles(u.borderStyles);
+            if (typeof u.value === 'number' && Number.isFinite(u.value)) {
+              targetSide.value = sanitizeNumber(u.value);
+              if (msg.sideIndex === 0) {
+                player.life = targetSide.value;
+              }
+            }
           }
           broadcastStateUpdate(currentSession, msg.actionId);
         }
         return;
       }
 
-      // 3. Remove Player (or unmerge)
-      if (msg.type === 'remove_player' && msg.playerId) {
+      // Remove Player
+      if (msg.type === 'remove_player' && typeof msg.playerId === 'string') {
         const toRemove = currentSession.state.players.find(p => p.id === msg.playerId);
         if (toRemove && toRemove.mergedWith) {
           const other = currentSession.state.players.find(p => p.id === toRemove.mergedWith);
@@ -583,27 +512,38 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // 4. Update Player Properties (x, y, angle, name, color, mergedWith)
-      if (msg.type === 'update_player' && msg.playerId && msg.updates) {
+      // Update Player Properties
+      if (msg.type === 'update_player' && typeof msg.playerId === 'string' && msg.updates && typeof msg.updates === 'object') {
         const player = currentSession.state.players.find(p => p.id === msg.playerId);
         if (player) {
-          Object.assign(player, msg.updates);
-          if (Array.isArray(msg.updates.sides)) {
-            player.life = msg.updates.sides[0];
+          const u = msg.updates;
+          if (u.name !== undefined) player.name = sanitizeString(u.name, player.name, 40);
+          if (typeof u.x === 'number') player.x = sanitizeNumber(u.x, player.x, -2000, 2000);
+          if (typeof u.y === 'number') player.y = sanitizeNumber(u.y, player.y, -2000, 2000);
+          if (typeof u.angle === 'number') player.angle = sanitizeNumber(u.angle, player.angle, -360, 360);
+          if (u.color !== undefined) player.color = sanitizeColor(u.color, player.color);
+          if (u.bgImage !== undefined) player.bgImage = u.bgImage ? sanitizeString(u.bgImage, null, 512) : null;
+          if (u.borderStyles !== undefined) player.borderStyles = sanitizeBorderStyles(u.borderStyles);
+          if (u.mergedWith !== undefined) player.mergedWith = u.mergedWith ? sanitizeString(u.mergedWith, null, 64) : null;
+
+          if (Array.isArray(u.sides)) {
+            player.sides = sanitizeSides(u.sides, player.life || 20, player.color, player.bgImage);
+            const mainSide = player.sides.find(s => s.index === 0) || player.sides[0];
+            if (mainSide) player.life = mainSide.value;
           }
+
           broadcastStateUpdate(currentSession, msg.actionId);
         }
         return;
       }
 
-      // 5. Merge Players
-      if (msg.type === 'merge_players' && msg.player1Id && msg.player2Id) {
+      // Merge Players
+      if (msg.type === 'merge_players' && typeof msg.player1Id === 'string' && typeof msg.player2Id === 'string') {
         const p1 = currentSession.state.players.find(p => p.id === msg.player1Id);
         const p2 = currentSession.state.players.find(p => p.id === msg.player2Id);
-        if (p1 && p2) {
+        if (p1 && p2 && p1.id !== p2.id) {
           p1.mergedWith = p2.id;
           p2.mergedWith = p1.id;
-          // Synchronize position
           p2.x = p1.x;
           p2.y = p1.y;
           p2.angle = p1.angle;
@@ -613,8 +553,8 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // 6. Unmerge Players
-      if (msg.type === 'unmerge_player' && msg.playerId) {
+      // Unmerge Players
+      if (msg.type === 'unmerge_player' && typeof msg.playerId === 'string') {
         const p1 = currentSession.state.players.find(p => p.id === msg.playerId);
         if (p1 && p1.mergedWith) {
           const p2 = currentSession.state.players.find(p => p.id === p1.mergedWith);
@@ -625,7 +565,6 @@ wss.on('connection', (ws, req) => {
             const baseY = typeof p1.y === 'number' ? p1.y : 0;
             const angleDeg = typeof p1.angle === 'number' ? p1.angle : 0;
             const rad = (angleDeg * Math.PI) / 180;
-            // Place side-by-side perpendicular to facing direction
             const offX = Math.round(95 * Math.cos(rad));
             const offY = Math.round(95 * Math.sin(rad));
 
@@ -642,70 +581,53 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // 7. Delete Session
-      if (msg.type === 'delete_session' && msg.sessionKey) {
-        const keyToDelete = sanitizeKey(msg.sessionKey);
-        markSessionDeleted(keyToDelete);
-        const filePath = getSessionFilePath(keyToDelete);
-        const sessionObj = sessions.get(keyToDelete);
-
-        if (sessionObj) {
-          if (sessionObj.saveTimer) {
-            clearTimeout(sessionObj.saveTimer);
-            sessionObj.saveTimer = null;
-          }
-          sessionObj.dirty = false;
-          sessions.delete(keyToDelete);
-
-          const remaining = getActiveSessionsList().filter(s => s.sessionKey !== keyToDelete && !isSessionDeleted(s.sessionKey));
-          const fallbackKey = remaining.length > 0 ? remaining[0].sessionKey : generate4DigitCode();
-
-          for (const client of sessionObj.clients) {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(JSON.stringify({
-                type: 'session_deleted',
-                sessionKey: keyToDelete,
-                fallbackKey,
-              }));
-            }
-          }
-          sessionObj.clients.clear();
-        }
-
-        if (fs.existsSync(filePath)) {
-          try { fs.unlinkSync(filePath); } catch (e) {
-            console.error('Error deleting session file:', e);
-          }
-        }
-
-        broadcastGlobalSessionList();
-        return;
-      }
-
-      // 8. Highlight Card (Synced focus token)
+      // Highlight Card
       if (msg.type === 'highlight_card') {
-        currentSession.state.highlightedCardId = msg.cardId || null;
+        currentSession.state.highlightedCardId = msg.cardId ? sanitizeString(msg.cardId, null, 64) : null;
         broadcastStateUpdate(currentSession, msg.actionId);
         return;
       }
 
-      // 9. Update Room Settings
+      // Update Room Settings
       if (msg.type === 'update_room_settings' && msg.settings && typeof msg.settings === 'object') {
         if (!currentSession.state.roomSettings || typeof currentSession.state.roomSettings !== 'object') {
           currentSession.state.roomSettings = {};
         }
-        Object.assign(currentSession.state.roomSettings, msg.settings);
+
+        const safeKeys = [
+          'theme', 'icon', 'primaryColor', 'secondaryColor', 'accentColor',
+          'customFont', 'zoomScale', 'orientation', 'layout', 'customColors',
+          'hideCounters', 'turnBallMode', 'showClock', 'tableBackground',
+          'gameMode', 'keepScreenAwake'
+        ];
+
+        for (const key of safeKeys) {
+          if (msg.settings[key] !== undefined) {
+            const val = msg.settings[key];
+            if (typeof val === 'string') {
+              currentSession.state.roomSettings[key] = sanitizeString(val, '', 256);
+            } else if (typeof val === 'number') {
+              currentSession.state.roomSettings[key] = sanitizeNumber(val, 1, -1000, 1000);
+            } else if (typeof val === 'boolean') {
+              currentSession.state.roomSettings[key] = Boolean(val);
+            } else if (Array.isArray(val)) {
+              currentSession.state.roomSettings[key] = val.filter(x => typeof x === 'string').slice(0, 50);
+            }
+          }
+        }
+
         broadcastStateUpdate(currentSession, msg.actionId);
         return;
       }
 
-      // 11. Reorder Players
+      // Reorder Players
       if (msg.type === 'reorder_players') {
         const players = currentSession.state.players;
         if (Array.isArray(msg.order)) {
+          const safeOrder = msg.order.filter(id => typeof id === 'string');
           const playerMap = new Map(players.map((p) => [p.id, p]));
           const newPlayers = [];
-          for (const id of msg.order) {
+          for (const id of safeOrder) {
             if (playerMap.has(id)) {
               newPlayers.push(playerMap.get(id));
               playerMap.delete(id);
@@ -718,7 +640,7 @@ wss.on('connection', (ws, req) => {
           broadcastStateUpdate(currentSession, msg.actionId);
           return;
         }
-        if (msg.sourceId && msg.targetId) {
+        if (typeof msg.sourceId === 'string' && typeof msg.targetId === 'string') {
           const sourceIndex = players.findIndex((p) => p.id === msg.sourceId);
           const targetIndex = players.findIndex((p) => p.id === msg.targetId);
           if (sourceIndex >= 0 && targetIndex >= 0 && sourceIndex !== targetIndex) {
@@ -728,15 +650,6 @@ wss.on('connection', (ws, req) => {
           }
           return;
         }
-      }
-
-      // 10. Generic Patch
-      if (msg.type === 'patch') {
-        if (msg.updates && typeof msg.updates === 'object') {
-          Object.assign(currentSession.state, msg.updates);
-          broadcastStateUpdate(currentSession, msg.actionId);
-        }
-        return;
       }
     } catch (err) {
       console.error('Invalid WS message received:', err);
@@ -753,8 +666,6 @@ wss.on('connection', (ws, req) => {
         type: 'presence',
         connectedClients: currentSession.clients.size,
       });
-
-      setTimeout(broadcastGlobalSessionList, 50);
     }
   });
 });

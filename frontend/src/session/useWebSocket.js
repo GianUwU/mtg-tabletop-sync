@@ -5,25 +5,11 @@ export function useWebSocket({
   serverStateRef,
   pendingActionsRef,
   onStateReconciled,
-  onSessionDeleted,
   activeSessionKeyRef,
 }) {
   const [connected, setConnected] = useState(false)
   const [clientCount, setClientCount] = useState(1)
-  const [activeSessions, setActiveSessions] = useState([])
   const wsRef = useRef(null)
-
-  // Fetch initial list of active sessions
-  useEffect(() => {
-    fetch('/api/sessions')
-      .then((res) => res.json())
-      .then((data) => {
-        if (Array.isArray(data.sessions)) {
-          setActiveSessions(data.sessions)
-        }
-      })
-      .catch(() => {})
-  }, [])
 
   // Establish WebSocket connection and handle auto-reconnect
   useEffect(() => {
@@ -54,16 +40,6 @@ export function useWebSocket({
         if (!isMounted) return
         try {
           const data = JSON.parse(event.data)
-
-          if (data.type === 'active_sessions' && Array.isArray(data.sessions)) {
-            setActiveSessions(data.sessions)
-            return
-          }
-
-          if (data.type === 'session_deleted') {
-            if (onSessionDeleted) onSessionDeleted(data)
-            return
-          }
 
           if (data.sessionKey && data.sessionKey !== activeSessionKeyRef.current) {
             return
@@ -132,7 +108,7 @@ export function useWebSocket({
       if (reconnectTimeout) clearTimeout(reconnectTimeout)
       if (wsRef.current) wsRef.current.close()
     }
-  }, [sessionKey, onStateReconciled, onSessionDeleted, activeSessionKeyRef, pendingActionsRef, serverStateRef])
+  }, [sessionKey, onStateReconciled, activeSessionKeyRef, pendingActionsRef, serverStateRef])
 
   const sendRawMessage = useCallback((msg) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -143,8 +119,6 @@ export function useWebSocket({
   return {
     connected,
     clientCount,
-    activeSessions,
-    setActiveSessions,
     sendRawMessage,
   }
 }

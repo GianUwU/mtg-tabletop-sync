@@ -43,30 +43,22 @@ export function useSession() {
   }, [])
 
   const switchSession = useCallback((newKey) => {
-    const clean = (newKey || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_') || generate4DigitCode()
+    const clean = (newKey || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '_').slice(0, 32) || generate4DigitCode()
     setSessionKey(clean)
     const url = new URL(window.location.href)
     url.searchParams.set('session', clean)
     window.history.pushState({}, '', url)
   }, [])
 
-  const onSessionDeleted = useCallback((data) => {
-    const nextKey = data.fallbackKey || generate4DigitCode()
-    switchSession(nextKey)
-  }, [switchSession])
-
   const {
     connected,
     clientCount,
-    activeSessions,
-    setActiveSessions,
     sendRawMessage,
   } = useWebSocket({
     sessionKey,
     serverStateRef,
     pendingActionsRef,
     onStateReconciled,
-    onSessionDeleted,
     activeSessionKeyRef,
   })
 
@@ -214,35 +206,6 @@ export function useSession() {
     switchSession(newKey)
   }, [switchSession])
 
-  const deleteSession = useCallback((keyToDelete) => {
-    const targetKey = keyToDelete || activeSessionKeyRef.current
-    try {
-      localStorage.removeItem(`mtg_card_positions_${targetKey}`)
-    } catch (_) {}
-
-    let nextRoomKey = null
-    setActiveSessions((prev) => {
-      const remaining = prev.filter((s) => s.sessionKey !== targetKey)
-      if (remaining.length > 0) {
-        nextRoomKey = remaining[0].sessionKey
-      }
-      return remaining
-    })
-
-    sendRawMessage({
-      type: 'delete_session',
-      sessionKey: targetKey,
-    })
-
-    if (targetKey === activeSessionKeyRef.current) {
-      if (nextRoomKey) {
-        switchSession(nextRoomKey)
-      } else {
-        switchSession(generate4DigitCode())
-      }
-    }
-  }, [switchSession, setActiveSessions, sendRawMessage])
-
   // Reset all players' life according to game mode & reset side counters
   const resetAllPlayersLife = useCallback((soloLife = 40, teamLife = 60, gameMode = 'commander') => {
     dispatchAction(
@@ -283,7 +246,6 @@ export function useSession() {
     highlightedCardId: state.highlightedCardId || null,
     connected,
     clientCount,
-    activeSessions,
     addPlayer,
     updateLife,
     addSide,
@@ -296,7 +258,6 @@ export function useSession() {
     reorderPlayers,
     switchSession,
     createNewSession,
-    deleteSession,
     resetAllPlayersLife,
     setHighlightedCard,
     updateRoomSettings,

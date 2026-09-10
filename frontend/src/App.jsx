@@ -622,7 +622,6 @@ export default function App() {
     players,
     highlightedCardId,
     connected,
-    activeSessions,
     addPlayer,
     updateLife,
     addSide,
@@ -635,7 +634,6 @@ export default function App() {
     reorderPlayers,
     switchSession,
     createNewSession,
-    deleteSession,
     resetAllPlayersLife,
     setHighlightedCard,
     updateRoomSettings,
@@ -5014,37 +5012,15 @@ export default function App() {
                     <span className="sector-title-icon">🌐</span>
                     <span>Room #{sessionKey}</span>
                   </div>
-                  <button
-                    type="button"
-                    className="room-delete-btn"
-                    onClick={() => {
-                      showConfirm({
-                        title: 'Delete Room',
-                        message: `Delete room "${sessionKey}"? This will permanently delete the session and all player counters.`,
-                        danger: true,
-                        icon: '⚠️',
-                        confirmText: 'Delete Room',
-                        onConfirm: () => {
-                          deleteSession(sessionKey)
-                          setMenuOpen(false)
-                        },
-                      })
-                    }}
-                    title="Delete Current Room"
-                  >
-                    &times;
-                  </button>
                 </div>
 
                 <form onSubmit={handleRoomSubmit} className="sector-actions">
                   <input
                     type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
                     maxLength={4}
-                    placeholder="4-digit #"
+                    placeholder="4-char code"
                     value={roomCodeInput}
-                    onChange={(e) => setRoomCodeInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                    onChange={(e) => setRoomCodeInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4))}
                     className="sector-room-input"
                     autoComplete="off"
                   />
